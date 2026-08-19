@@ -118,9 +118,7 @@ final class OrphanWatchdog
      */
     private function propertyPid(SwooleServer $master): int
     {
-        $pid = $master->master_pid ?? 0;
-
-        return is_int($pid) ? $pid : 0;
+        return $master->master_pid;
     }
 
     /**

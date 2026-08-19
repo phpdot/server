@@ -150,9 +150,9 @@ final class Heartbeat
             return function_exists('posix_getppid') ? posix_getppid() : (int) getmypid();
         }
 
-        $pid = $event->server->getMaster()->master_pid ?? 0;
+        $pid = $event->server->getMaster()->master_pid;
 
-        return is_int($pid) && $pid > 0 ? $pid : (int) getmypid();
+        return $pid > 0 ? $pid : (int) getmypid();
     }
 
     /**

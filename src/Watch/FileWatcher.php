@@ -101,8 +101,7 @@ final class FileWatcher
         $pid = $master->getMasterPid();
 
         if ($pid <= 0) {
-            $prop = $master->master_pid ?? 0;
-            $pid = is_int($prop) ? $prop : 0;
+            $pid = $master->master_pid;
         }
 
         if ($pid <= 0 && function_exists('posix_getppid')) {

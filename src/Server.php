@@ -328,15 +328,14 @@ final class Server implements ServerInterface
      * Stop a worker process.
      *
      * @param int $workerId Worker ID to stop (-1 for current).
-     * @param bool $waitEvent Wait for events to complete.
      *
      * @throws ServerException If the server has not been started.
      *
      * @return bool
      */
-    public function stop(int $workerId = -1, bool $waitEvent = false): bool
+    public function stop(int $workerId = -1): bool
     {
-        return $this->requireMaster()->stop($workerId, $waitEvent);
+        return $this->requireMaster()->stop($workerId);
     }
 
     /**
