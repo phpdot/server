@@ -20,8 +20,8 @@ declare(strict_types=1);
 
 namespace PHPdot\Server\Tcp;
 
+use PHPdot\Contracts\Server\TcpHandlerInterface;
 use PHPdot\Server\Config\TcpServerConfig;
-use PHPdot\Server\Contract\TcpHandlerInterface;
 use PHPdot\Server\Contract\Transport;
 use PHPdot\Server\Exception\ServerException;
 use Swoole\Server as SwooleServer;

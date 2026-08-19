@@ -134,6 +134,7 @@ final class RequestConverterUploadsTest extends TestCase
 
     /**
      * @param array<string, mixed> $files
+     *
      * @return array<array-key, mixed>
      */
     private function normalize(array $files): array

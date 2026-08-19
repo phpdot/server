@@ -13,8 +13,8 @@ declare(strict_types=1);
  * SseTest; argv[1] = port.
  */
 
-use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Contracts\Server\SseHandlerInterface;
+use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Server\Config\HttpServerConfig;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Http\HttpServer;

@@ -18,21 +18,32 @@
         "psr-15"
     ],
     "require": {
-        "php": ">=8.5",
         "ext-swoole": ">=6.2",
+        "php": ">=8.5",
+        "composer-runtime-api": "^2.2",
+        "phpdot/console": "^0.1",
         "phpdot/contracts": "^0.1",
         "phpdot/http": "^0.1",
+        "psr/container": "^2.0",
         "psr/http-factory": "^1.0",
         "psr/http-message": "^2.0",
-        "psr/http-server-handler": "^1.0"
+        "psr/http-server-handler": "^1.0",
+        "symfony/console": "^8.0"
     },
     "require-dev": {
+        "phpdot/redis": "^0.1",
         "friendsofphp/php-cs-fixer": "^3.94",
         "phpdot/container": "^0.1",
         "phpstan/phpstan": "^2.0",
         "phpstan/phpstan-strict-rules": "^2.0",
         "phpunit/phpunit": "^13.0",
         "swoole/ide-helper": "^6.0"
+    },
+    "suggest": {
+        "ext-pcntl": "Forwards SIGINT/SIGTERM from server:start to the master for a clean stop (guarded at runtime).",
+        "ext-posix": "Lets the cluster heartbeat report the true master pid (guarded at runtime).",
+        "phpdot/container": "Autowires the container-attribute services and #[Config] DTOs declared in src (the attributes stay inert until reflected, so standalone consumers don't need it installed).",
+        "phpdot/redis": "Publishes this node into the Redis cluster registry via the class_exists-guarded Heartbeat."
     },
     "autoload": {
         "psr-4": {

@@ -14,4 +14,4 @@ namespace PHPdot\Server\Exception;
 
 use RuntimeException;
 
-final class ServerException extends RuntimeException {}
+class ServerException extends RuntimeException {}

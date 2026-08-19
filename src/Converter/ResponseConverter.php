@@ -29,10 +29,15 @@ final class ResponseConverter
      * @param int $chunkSize Maximum chunk size in bytes for large responses.
      * @param string $serverSoftware Default "Server" header when the response sets
      *                               none (empty = Swoole default).
+     * @param bool $keepAlive HTTP keep-alive; false stamps "Connection: close" so Swoole
+     *                        closes each connection after its response — development
+     *                        posture that keeps BASE-mode reload/shutdown instant (idle
+     *                        keep-alive sockets otherwise pin exiting workers).
      */
     public function __construct(
         private readonly int $chunkSize = 1048576,
         private readonly string $serverSoftware = '',
+        private readonly bool $keepAlive = true,
     ) {}
 
     /**
@@ -80,6 +85,10 @@ final class ResponseConverter
 
         if ($this->serverSoftware !== '' && !$psrResponse->hasHeader('Server')) {
             $swooleResponse->header('Server', $this->serverSoftware);
+        }
+
+        if (!$this->keepAlive) {
+            $swooleResponse->header('Connection', 'close');
         }
 
         $this->emitCookies($psrResponse, $swooleResponse);
@@ -321,6 +330,7 @@ final class ResponseConverter
                 }
             }
 
+            $started = true;
             $swooleResponse->sendfile($meta['uri'], $offset, $length);
             return;
         }

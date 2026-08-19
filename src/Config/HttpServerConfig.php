@@ -23,6 +23,9 @@ final class HttpServerConfig
     /**
      * Create the HTTP server configuration.
      *
+     * @param bool $enabled Attach this transport when ServerFactory builds the server.
+     * @param bool $keepAlive HTTP keep-alive; disable in development so idle sockets never
+     *                        pin exiting BASE workers (reload/shutdown stay instant).
      * @param int $sockType SWOOLE_SOCK_TCP (add SWOOLE_SSL for TLS).
      * @param string $serverSoftware "Server" response header (empty = Swoole default).
      * @param bool $httpParsePost Auto-parse POST body.
@@ -46,6 +49,8 @@ final class HttpServerConfig
      * @param string $sslCiphers
      */
     public function __construct(
+        public readonly bool $enabled = true,
+        public readonly bool $keepAlive = true,
         public readonly string $host = '0.0.0.0',
         public readonly int $port = 8080,
         public readonly int $sockType = SWOOLE_SOCK_TCP,

@@ -14,6 +14,10 @@ declare(strict_types=1);
  * when the master is gone it SIGTERMs the manager (which tears its workers
  * down), then sweeps any survivors, escalating to SIGKILL, and exits.
  *
+ * The probe is pid-based only in PROCESS mode. In BASE mode master_pid is a
+ * shared-memory slot that workers overwrite with their own pid, so pid
+ * probing is disabled there and reparenting is the sole death signal.
+ *
  * On a NORMAL shutdown the manager terminates this process together with the
  * other user processes — the reap path never runs.
  *
@@ -41,28 +45,53 @@ final class OrphanWatchdog
     ) {}
 
     /**
-     * Probe the master until it disappears, then reap the leftovers. Blocks;
-     * runs inside a dedicated Swoole user process.
+     * Watch for the tree's death, then reap the leftovers. Blocks; runs inside
+     * a dedicated Swoole user process. Two death signals, neither captured
+     * across a fork (pre-captured pids go stale the moment daemonize forks —
+     * a stale capture once made this watchdog reap its own healthy daemon):
+     * reparenting (getppid changes when the parent manager/master dies) and,
+     * where $allowPidProbe permits, a liveness probe of the master pid.
      *
      * @param SwooleServer $master
+     * @param int $masterPid Explicit master pid override; 0 resolves it per $allowPidProbe.
+     * @param bool $allowPidProbe Permit pid-based probing — PROCESS mode only. Swoole keeps
+     *                            master_pid in shared memory and BASE workers write their own
+     *                            pid into that slot, so the property AND getMasterPid() both
+     *                            resolve to a WORKER pid inside a BASE user process. Workers
+     *                            die by design on every reload, and probing one made this
+     *                            watchdog reap the whole healthy tree two seconds after each
+     *                            USR1. BASE relies on the reparenting guard alone.
      *
      * @return void
      */
-    public function run(SwooleServer $master): void
+    public function run(SwooleServer $master, int $masterPid = 0, bool $allowPidProbe = true): void
     {
         Process::signal(SIGINT, static function (): void {});
 
-        $masterPid = $master->getMasterPid();
-        while ($masterPid <= 0) {
-            Coroutine::sleep(0.5);
-            $masterPid = $master->getMasterPid();
+        $guardPpid = function_exists('posix_getppid') ? posix_getppid() : 0;
+
+        if ($masterPid <= 0 && $allowPidProbe) {
+            $masterPid = $this->propertyPid($master);
         }
 
-        while (Process::kill($masterPid, 0) !== false) {
+        while (true) {
             Coroutine::sleep($this->interval);
+
+            if ($guardPpid > 0 && posix_getppid() !== $guardPpid) {
+                break;
+            }
+
+            if ($masterPid <= 0 && $allowPidProbe) {
+                $fromProperty = $this->propertyPid($master);
+                $masterPid = $fromProperty > 0 ? $fromProperty : $master->getMasterPid();
+            }
+
+            if ($masterPid > 0 && Process::kill($masterPid, 0) === false) {
+                break;
+            }
         }
 
-        $managerPid = $master->getManagerPid();
+        $managerPid = $guardPpid;
         if ($managerPid > 0 && Process::kill($managerPid, 0) !== false) {
             Process::kill($managerPid, SIGTERM);
         }
@@ -78,6 +107,20 @@ final class OrphanWatchdog
         foreach ($this->leftoverPids($master, $managerPid) as $pid) {
             Process::kill($pid, SIGKILL);
         }
+    }
+
+    /**
+     * The master pid from Swoole's post-start master_pid property, 0 when unset.
+     *
+     * @param SwooleServer $master
+     *
+     * @return int
+     */
+    private function propertyPid(SwooleServer $master): int
+    {
+        $pid = $master->master_pid ?? 0;
+
+        return is_int($pid) ? $pid : 0;
     }
 
     /**

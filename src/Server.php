@@ -26,12 +26,14 @@ use Closure;
 use PHPdot\Container\Attribute\Binds;
 use PHPdot\Container\Attribute\Singleton;
 use PHPdot\Contracts\Server\ServerInterface;
+use PHPdot\Contracts\Server\SseHandlerInterface;
 use PHPdot\Contracts\Server\WebSocketHandlerInterface;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Contract\Transport;
 use PHPdot\Server\Event\LifecycleEventRegistry;
 use PHPdot\Server\Exception\ServerException;
 use PHPdot\Server\Http\HttpServer;
+use PHPdot\Server\Process\ControlSocket;
 use PHPdot\Server\Process\OrphanWatchdog;
 use PHPdot\Server\Process\ProcessManager;
 use Psr\Http\Server\RequestHandlerInterface;
@@ -59,6 +61,12 @@ final class Server implements ServerInterface
     private Closure|null $onTaskHandler = null;
 
     private Closure|null $onFinishHandler = null;
+
+    /**
+     * @var array<string, mixed> Swoole settings merged last in serve() — runtime
+     *                           overrides of the config file (e.g. the CLI's -d daemonize flag).
+     */
+    private array $overrides = [];
 
     /**
      * __construct.
@@ -119,7 +127,12 @@ final class Server implements ServerInterface
         $swoole = $this->createMaster($primary, $isHttp, $isWebSocket);
         $this->swoole = $swoole;
 
-        $swoole->set(array_merge($this->config->toArray(), $primary->settings()));
+        $swoole->set(array_merge(
+            $this->config->toArray(),
+            $this->streamingSettings($handler),
+            $primary->settings(),
+            $this->overrides,
+        ));
 
         $primary->register($swoole, true, $handler);
 
@@ -146,9 +159,14 @@ final class Server implements ServerInterface
 
         $this->processes->attachTo($swoole);
 
-        if ($this->config->orphanWatchdog && $this->config->mode === SWOOLE_PROCESS) {
-            $swoole->addProcess(new \Swoole\Process(static function () use ($swoole): void {
-                new OrphanWatchdog()->run($swoole);
+        if ($this->config->controlSocket() !== '') {
+            ControlSocket::attach($swoole, $this->config->controlSocket());
+        }
+
+        if ($this->config->orphanWatchdog) {
+            $allowPidProbe = $this->config->mode === SWOOLE_PROCESS;
+            $swoole->addProcess(new \Swoole\Process(static function () use ($swoole, $allowPidProbe): void {
+                new OrphanWatchdog()->run($swoole, 0, $allowPidProbe);
             }, false, 0, true));
         }
 
@@ -157,6 +175,70 @@ final class Server implements ServerInterface
         }
 
         $swoole->start();
+    }
+
+    /**
+     * Long-lived-connection self-protection, derived from what is actually
+     * being served instead of declared in config. Two facts each prove the
+     * server holds connections that outlive any request: a handler speaking
+     * SSE or WebSocket (streams over the HTTP transport), and any non-HTTP
+     * transport being attached (a raw socket has no request/response cycle
+     * to end it — TCP clients stay connected indefinitely). Recycling a
+     * worker in BASE mode takes its owned connections down with it, an
+     * incident nothing connects back to max_request — so either fact
+     * disables recycling and raises the drain-window floor to 30s for slow
+     * teardown. Announced with one log line because it changes explicit
+     * config; override() is merged later and remains the escape hatch.
+     *
+     * @param RequestHandlerInterface $handler The application handler
+     *
+     * @return array<string, mixed>
+     */
+    private function streamingSettings(RequestHandlerInterface $handler): array
+    {
+        $reasons = [];
+
+        if ($handler instanceof SseHandlerInterface || $handler instanceof WebSocketHandlerInterface) {
+            $reasons[] = 'the handler speaks SSE/WS';
+        }
+
+        foreach ($this->transports as $transport) {
+            if (!$transport instanceof HttpServer) {
+                $reasons[] = 'a raw-socket transport is attached';
+                break;
+            }
+        }
+
+        if ($reasons === []) {
+            return [];
+        }
+
+        error_log(
+            '[server] ' . implode(' and ', $reasons) . ' — connections outlive requests: '
+            . 'worker recycling disabled (max_request=0), drain window raised to >= 30s; '
+            . 'use override() to force different values',
+        );
+
+        return [
+            'max_request' => 0,
+            'max_wait_time' => max($this->config->maxWaitTime, 30),
+        ];
+    }
+
+    /**
+     * Merge Swoole settings on top of the config file for this run only — the
+     * CLI uses this for flags like -d (daemonize) without mutating config DTOs.
+     * Call before serve().
+     *
+     * @param array<string, mixed> $settings
+     *
+     * @return $this
+     */
+    public function override(array $settings): static
+    {
+        $this->overrides = array_merge($this->overrides, $settings);
+
+        return $this;
     }
 
     /**

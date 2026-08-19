@@ -26,6 +26,7 @@ final class TcpServerConfig
     /**
      * Create the TCP server configuration.
      *
+     * @param bool $enabled Attach this transport when ServerFactory builds the server.
      * @param int $sockType SWOOLE_SOCK_TCP (add SWOOLE_SSL for TLS)
      * @param TcpFraming $framing wire-framing mode (default EOF/line)
      * @param string $packageEof delimiter for EOF mode
@@ -37,6 +38,7 @@ final class TcpServerConfig
      * @param int $port
      */
     public function __construct(
+        public readonly bool $enabled = false,
         public readonly string $host = '0.0.0.0',
         public readonly int $port = 9501,
         public readonly int $sockType = SWOOLE_SOCK_TCP,

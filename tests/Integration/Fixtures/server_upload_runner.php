@@ -48,6 +48,7 @@ $handler = new class ($factory) implements RequestHandlerInterface {
 
     /**
      * @param array<array-key, mixed> $files
+     *
      * @return array<array-key, mixed>
      */
     private function describe(array $files): array

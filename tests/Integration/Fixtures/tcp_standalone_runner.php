@@ -18,10 +18,10 @@ declare(strict_types=1);
  * here (no HttpServer). Flagged as an API wart for the SR-M3 rewrite.
  */
 
+use PHPdot\Contracts\Server\TcpHandlerInterface;
 use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Config\TcpServerConfig;
-use PHPdot\Server\Contract\TcpHandlerInterface;
 use PHPdot\Server\Server;
 use PHPdot\Server\Tcp\TcpServer;
 use Psr\Http\Message\ResponseInterface;

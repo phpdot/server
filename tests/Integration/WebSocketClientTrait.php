@@ -114,6 +114,7 @@ trait WebSocketClientTrait
      * Read one server frame (unmasked). Returns [firstByte, payload].
      *
      * @param resource $socket
+     *
      * @return array{0: int, 1: string}
      */
     private function readFrame($socket): array

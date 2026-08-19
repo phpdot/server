@@ -5,12 +5,16 @@ declare(strict_types=1);
 /**
  * FileWatcher.
  *
- * The development hot-reload engine. Runs as a Swoole user process (attached by
- * the ProcessManager), polling the files described by a WatcherInterface. On
- * change it reloads the workers for app code — SIGUSR1 to the master, which only
- * reloads code loaded after the fork — and prints a notice that a full restart
- * is required for code loaded before the fork (config, bootstrap). All policy
- * lives in WatcherInterface; this is pure mechanism.
+ * The development hot-reload engine for LIBRARY embedding: runs as a Swoole
+ * user process (attached by the ProcessManager), polling the paths described
+ * by a WatcherInterface — directories are scanned recursively, explicitly
+ * listed files are watched as-is. App-code changes reload the workers
+ * (SIGUSR1 — reloads code loaded after the fork); restart-classified changes
+ * (pre-fork state) print a notice, because a process cannot restart itself.
+ * The CLI's --watch does NOT use this class in-server: its supervisor watches
+ * the files itself and signals the child pid it owns, which also covers full
+ * restarts. snapshot()/plan() are reused by that supervisor. All policy lives
+ * in WatcherInterface; this is pure mechanism.
  *
  * @author Omar Hamdan <omar@phpdot.com>
  * @license MIT
@@ -42,14 +46,21 @@ final class FileWatcher
      * server shutdown.
      *
      * @param SwooleServer $master
+     * @param int $masterPid The master's pid captured pre-fork by ProcessManager::attachTo()
+     *                       — the authoritative value; 0 falls back to runtime resolution
      *
      * @return void
      */
-    public function run(SwooleServer $master): void
+    public function run(SwooleServer $master, int $masterPid = 0): void
     {
         Process::signal(SIGINT, static function (): void {});
+        Process::signal(SIGTERM, function (): void {
+            $this->stop();
+        });
 
-        $masterPid = $master->getMasterPid();
+        if ($masterPid <= 0) {
+            $masterPid = $this->resolveMasterPid($master);
+        }
         $previous = $this->snapshot();
 
         while ($this->running) {
@@ -70,9 +81,35 @@ final class FileWatcher
             Coroutine::sleep($this->watcher->debounce());
             $plan = $this->plan($previous);
 
-            $this->act($master, $plan['reload'], $plan['restart']);
+            $this->act($masterPid, $plan['reload'], $plan['restart']);
             $previous = $plan['snapshot'];
         }
+    }
+
+    /**
+     * The master's pid, resolved robustly from inside the forked user process:
+     * getMasterPid() returns 0 in BASE mode here (signalling pid 0 would hit
+     * the whole process group), so fall back to the master_pid property and
+     * finally to this process's parent.
+     *
+     * @param SwooleServer $master
+     *
+     * @return int
+     */
+    private function resolveMasterPid(SwooleServer $master): int
+    {
+        $pid = $master->getMasterPid();
+
+        if ($pid <= 0) {
+            $prop = $master->master_pid ?? 0;
+            $pid = is_int($prop) ? $prop : 0;
+        }
+
+        if ($pid <= 0 && function_exists('posix_getppid')) {
+            $pid = posix_getppid();
+        }
+
+        return $pid;
     }
 
     /**
@@ -98,6 +135,12 @@ final class FileWatcher
         $files = [];
 
         foreach ($this->watcher->paths() as $root) {
+            if (is_file($root)) {
+                $this->record($root, $files);
+
+                continue;
+            }
+
             $this->scan($root, 0, $files);
         }
 
@@ -195,15 +238,33 @@ final class FileWatcher
                 continue;
             }
 
-            $mtime = @filemtime($path);
-            $size = @filesize($path);
-
-            if ($mtime !== false && $size !== false) {
-                $files[$path] = $mtime . ':' . $size;
-            }
+            $this->record($path, $files);
         }
 
         closedir($handle);
+    }
+
+    /**
+     * Record a file's change signature (mtime:size:inode) into the snapshot.
+     * The inode catches atomic-rename saves — how most editors write — even
+     * when mtime's one-second resolution and an unchanged size would hide the
+     * edit; only an in-place same-second write of identical length remains
+     * invisible.
+     *
+     * @param string $path Absolute file path
+     * @param array<string, string> $files
+     *
+     * @return void
+     */
+    private function record(string $path, array &$files): void
+    {
+        $mtime = @filemtime($path);
+        $size = @filesize($path);
+        $inode = @fileinode($path);
+
+        if ($mtime !== false && $size !== false) {
+            $files[$path] = $mtime . ':' . $size . ':' . ($inode === false ? 0 : $inode);
+        }
     }
 
     /**
@@ -226,23 +287,29 @@ final class FileWatcher
     }
 
     /**
-     * React to detected changes: reload workers or restart the server.
+     * React to detected changes: reload workers or restart the server. Restart
+     * supersedes reload — a mixed batch drains and re-execs, which reloads
+     * everything anyway.
      *
      * @param list<string> $reload
      * @param list<string> $restart
-     * @param \Swoole\Server $master
+     * @param int $masterPid
      *
      * @return void
      */
-    private function act(SwooleServer $master, array $reload, array $restart): void
+    private function act(int $masterPid, array $reload, array $restart): void
     {
-        if ($reload !== []) {
-            $this->notice('reloaded', $reload);
-            Process::kill($master->getMasterPid(), SIGUSR1);
+        if ($masterPid <= 0) {
+            return;
         }
 
         if ($restart !== []) {
             $this->notice('restart required', $restart);
+        }
+
+        if ($reload !== []) {
+            $this->notice('reloaded', $reload);
+            Process::kill($masterPid, SIGUSR1);
         }
     }
 

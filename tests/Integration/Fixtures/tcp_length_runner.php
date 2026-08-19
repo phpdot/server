@@ -16,10 +16,10 @@ declare(strict_types=1);
  * present only to satisfy the signature — handle() is never wired (no HttpServer).
  */
 
+use PHPdot\Contracts\Server\TcpHandlerInterface;
 use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Config\TcpServerConfig;
-use PHPdot\Server\Contract\TcpHandlerInterface;
 use PHPdot\Server\Server;
 use PHPdot\Server\Tcp\TcpFraming;
 use PHPdot\Server\Tcp\TcpServer;

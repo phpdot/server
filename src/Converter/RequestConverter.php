@@ -156,7 +156,9 @@ final class RequestConverter
     /**
      * Resolve the request scheme. Honors X-Forwarded-Proto (set by a trusting
      * reverse proxy / TLS terminator) so proxied HTTPS requests report `https`.
-     * Native SSL is not detected here — deploy behind a proxy that sets the header.
+     * Multi-hop proxy chains append per-hop values ("https, http") — the FIRST
+     * entry is the client-facing hop, so only it is consulted. Native SSL is
+     * not detected here — deploy behind a proxy that sets the header.
      *
      * @param array<string, string> $headers
      * @param array<string, string> $server
@@ -165,7 +167,7 @@ final class RequestConverter
      */
     private function resolveScheme(array $headers, array $server): string
     {
-        $forwarded = strtolower(trim($headers['x-forwarded-proto'] ?? ''));
+        $forwarded = strtolower(trim(explode(',', $headers['x-forwarded-proto'] ?? '')[0]));
         if ($forwarded === 'https' || $forwarded === 'http') {
             return $forwarded;
         }

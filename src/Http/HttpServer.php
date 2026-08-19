@@ -67,6 +67,28 @@ final class HttpServer implements Transport, OnWorkerExitInterface
     private array $wsAcceptedFds = [];
 
     /**
+     * Fds with an HTTP request currently being handled (per worker). onWorkerExit
+     * closes every OTHER connection — the idle keep-alive sockets that would
+     * otherwise pin an exiting BASE worker until the max_wait_time force-kill
+     * (ERRNO 9101), turning every reload into a multi-second stall.
+     *
+     * @var array<int, true>
+     */
+    private array $activeHttpFds = [];
+
+    /**
+     * Every open connection fd (per worker), maintained via the connect/close
+     * events. The exit sweep needs its own ledger: in BASE mode the
+     * Server::$connections iterator is PER-WORKER (each worker's connections
+     * live on its own heap, not in shared memory) and its behavior during the
+     * exit phase is unreliable, so the only list of a worker's sockets this
+     * sweep can trust is the one the worker keeps itself.
+     *
+     * @var array<int, true>
+     */
+    private array $openFds = [];
+
+    /**
      * Create the HTTP server over its config, handler, and PSR-17 factory.
      *
      * @param ServerRequestFactoryInterface&UriFactoryInterface&StreamFactoryInterface&UploadedFileFactoryInterface $factory
@@ -77,7 +99,10 @@ final class HttpServer implements Transport, OnWorkerExitInterface
         private readonly HttpServerConfig $config = new HttpServerConfig(),
     ) {
         $this->requestConverter = new RequestConverter($factory, $factory, $factory, $factory);
-        $this->responseConverter = new ResponseConverter(serverSoftware: $config->serverSoftware);
+        $this->responseConverter = new ResponseConverter(
+            serverSoftware: $config->serverSoftware,
+            keepAlive: $config->keepAlive,
+        );
     }
 
     public function host(): string
@@ -117,6 +142,11 @@ final class HttpServer implements Transport, OnWorkerExitInterface
 
         $requestConverter = $this->requestConverter;
         $isSse = $handler instanceof SseHandlerInterface;
+
+        /**
+         * @var (\Closure(SwooleServer, int): void)|null $wsCloseHandler
+         */
+        $wsCloseHandler = null;
 
         if ($handler instanceof WebSocketHandlerInterface) {
             if (!$master instanceof WebSocketServer) {
@@ -159,7 +189,7 @@ final class HttpServer implements Transport, OnWorkerExitInterface
                 $wsHandler->handleWsMessage($fd, $data, $opcode);
             });
 
-            $ws->on('close', function (SwooleServer $server, int $fd) use ($wsHandler): void {
+            $wsCloseHandler = function (SwooleServer $server, int $fd) use ($wsHandler): void {
                 $established = isset($this->wsAcceptedFds[$fd]);
                 unset($this->wsAcceptedFds[$fd]);
 
@@ -172,11 +202,28 @@ final class HttpServer implements Transport, OnWorkerExitInterface
                 if ($established) {
                     $wsHandler->handleWsClose($fd, 1000, '');
                 }
-            });
+            };
         }
 
-        $master->on('request', function (SwooleRequest $req, SwooleResponse $resp) use ($handler, $isSse): void {
+        $master->on('connect', function (SwooleServer $server, int $fd): void {
+            $this->openFds[$fd] = true;
+        });
+
+        $master->on('close', function (SwooleServer $server, int $fd) use ($wsCloseHandler): void {
+            unset($this->openFds[$fd]);
+
+            if ($wsCloseHandler !== null) {
+                $wsCloseHandler($server, $fd);
+            }
+        });
+
+        $keepAlive = $this->config->keepAlive;
+
+        $master->on('request', function (SwooleRequest $req, SwooleResponse $resp) use ($handler, $isSse, $master, $keepAlive): void {
             $started = false;
+            $activeFd = $req->fd;
+            $this->activeHttpFds[$activeFd] = true;
+
             try {
                 $psr = $this->requestConverter->toServerRequest($req);
 
@@ -233,6 +280,10 @@ final class HttpServer implements Transport, OnWorkerExitInterface
 
                 $psrResponse = $handler->handle($psr);
                 $this->responseConverter->toSwoole($psrResponse, $resp, $psr->getMethod() === 'HEAD', $started);
+
+                if (!$keepAlive && $activeFd > 0) {
+                    $master->close($activeFd);
+                }
             } catch (\Throwable $e) {
                 if ($started) {
                     if ($resp->isWritable()) {
@@ -241,32 +292,62 @@ final class HttpServer implements Transport, OnWorkerExitInterface
                 } else {
                     $resp->status(500);
                     $resp->end($e->getMessage());
+
+                    if (!$keepAlive && $activeFd > 0) {
+                        $master->close($activeFd);
+                    }
                 }
+            } finally {
+                unset($this->activeHttpFds[$activeFd]);
             }
         });
 
     }
 
     /**
-     * Cancel in-flight SSE streams on worker exit so each unwinds before the
-     * reactor drain / force-kill (ERRNO 9101). Wired through the lifecycle
-     * registry's workerExit multiplexer (Server subscribes its transports) —
-     * NOT a raw $master->on('workerExit'), which the registry's own workerExit
-     * registration would silently replace, leaving SSE streams uncancelled.
-     * A no-op when no SSE stream is open on this worker.
+     * Unpin the exiting worker so it drains promptly instead of hitting the
+     * max_wait_time force-kill (ERRNO 9101): cancel in-flight SSE streams so
+     * each unwinds, then — BASE mode, where workers own their sockets — close
+     * every idle keep-alive connection (browsers hold several open; each pins
+     * the reactor). Connections with an active request, accepted WS upgrades,
+     * and live websocket_status fds are left untouched. Wired through the
+     * lifecycle registry's workerExit multiplexer (Server subscribes its
+     * transports) — NOT a raw $master->on('workerExit'), which the registry's
+     * own registration would silently replace.
      */
     public function onWorkerExit(Server $server, int $workerId): void
     {
-        if ($this->sseCoroutineIds === []) {
+        if ($this->sseCoroutineIds !== []) {
+            $cids = array_keys($this->sseCoroutineIds);
+
+            \Swoole\Coroutine::create(static function () use ($cids): void {
+                foreach ($cids as $cid) {
+                    \Swoole\Coroutine::cancel($cid);
+                }
+            });
+        }
+
+        \Swoole\Timer::clearAll();
+
+        if ($server->config()->mode !== SWOOLE_BASE) {
             return;
         }
 
-        $cids = array_keys($this->sseCoroutineIds);
+        $master = $server->getMaster();
 
-        \Swoole\Coroutine::create(static function () use ($cids): void {
-            foreach ($cids as $cid) {
-                \Swoole\Coroutine::cancel($cid);
+        foreach (array_keys($this->openFds) as $fd) {
+            if (isset($this->activeHttpFds[$fd]) || isset($this->wsAcceptedFds[$fd])) {
+                continue;
             }
-        });
+
+            $info = $master->getClientInfo($fd);
+
+            if (is_array($info) && ($info['websocket_status'] ?? 0) > 0) {
+                continue;
+            }
+
+            $master->close($fd);
+            unset($this->openFds[$fd]);
+        }
     }
 }

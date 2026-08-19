@@ -12,11 +12,11 @@ declare(strict_types=1);
  * HttpAndTcpTest; argv[1] = HTTP port, argv[2] = TCP port.
  */
 
+use PHPdot\Contracts\Server\TcpHandlerInterface;
 use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Server\Config\HttpServerConfig;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Config\TcpServerConfig;
-use PHPdot\Server\Contract\TcpHandlerInterface;
 use PHPdot\Server\Http\HttpServer;
 use PHPdot\Server\Server;
 use PHPdot\Server\Tcp\TcpServer;
@@ -42,6 +42,8 @@ $factory = new ResponseFactory();
 $tcpServer = new TcpServer(new TcpServerConfig(host: '127.0.0.1', port: $tcpPort));
 
 $handler = new class ($tcpServer, $factory) implements RequestHandlerInterface, TcpHandlerInterface {
+    public null|PHPdot\Server\Server $server = null;
+
     public function __construct(
         private readonly TcpServer $tcp,
         private readonly ResponseFactory $factory,
@@ -49,6 +51,14 @@ $handler = new class ($tcpServer, $factory) implements RequestHandlerInterface, 
 
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
+        if ($request->getUri()->getPath() === '/settings') {
+            return $this->factory->createResponse(200)
+                ->withHeader('Content-Type', 'application/json')
+                ->withBody($this->factory->createStream(
+                    (string) json_encode($this->server?->getMaster()->setting ?? []),
+                ));
+        }
+
         return $this->factory->createResponse(200)
             ->withHeader('Content-Type', 'text/plain')
             ->withBody($this->factory->createStream('OK'));
@@ -67,4 +77,5 @@ $handler = new class ($tcpServer, $factory) implements RequestHandlerInterface, 
 $server = new Server(new ServerConfig(workerNum: 1, hookFlags: 0));
 $server->attach(new HttpServer($factory, new HttpServerConfig(host: '127.0.0.1', port: $httpPort)));
 $server->attach($tcpServer);
+$handler->server = $server;
 $server->serve($handler);

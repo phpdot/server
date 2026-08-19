@@ -18,13 +18,13 @@ declare(strict_types=1);
  * argv[1] = HTTP port, argv[2] = TCP port.
  */
 
-use PHPdot\Http\Factory\ResponseFactory;
+use PHPdot\Contracts\Server\TcpHandlerInterface;
 use PHPdot\Contracts\Server\WebSocketHandlerInterface;
+use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Server\Config\HttpServerConfig;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Config\TcpServerConfig;
 use PHPdot\Server\Connection\ConnectionRegistry;
-use PHPdot\Server\Contract\TcpHandlerInterface;
 use PHPdot\Server\Http\HttpServer;
 use PHPdot\Server\Server;
 use PHPdot\Server\Tcp\TcpServer;

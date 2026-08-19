@@ -10,8 +10,8 @@ declare(strict_types=1);
  * Launched as a child process by WebSocketTest; argv[1] = port.
  */
 
-use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Contracts\Server\WebSocketHandlerInterface;
+use PHPdot\Http\Factory\ResponseFactory;
 use PHPdot\Server\Config\HttpServerConfig;
 use PHPdot\Server\Config\ServerConfig;
 use PHPdot\Server\Http\HttpServer;

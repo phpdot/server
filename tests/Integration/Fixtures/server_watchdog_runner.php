@@ -43,6 +43,6 @@ $handler = new class ($factory) implements RequestHandlerInterface {
     }
 };
 
-$server = new Server(new ServerConfig(workerNum: 2, hookFlags: 0));
+$server = new Server(new ServerConfig(workerNum: 2, mode: SWOOLE_PROCESS, hookFlags: 0));
 $server->attach(new HttpServer($factory, new HttpServerConfig(host: '127.0.0.1', port: $port)));
 $server->serve($handler);

@@ -50,7 +50,9 @@ final class ProcessManager
 
     /**
      * Attach the development file-watcher as a user process. Reloads workers on
-     * app-code changes; prints a restart notice for code loaded before the fork.
+     * app-code changes; restart-classified changes (code loaded before the fork)
+     * print a notice — a process cannot restart itself; use the CLI's --watch
+     * supervisor for automated full restarts.
      * Development only — never in production. Must be called before serve().
      *
      * @param WatcherInterface $watcher
@@ -76,9 +78,11 @@ final class ProcessManager
             $master->addProcess(new Process($handler, false, 0, true));
         }
 
+        $masterPid = getmypid();
+
         foreach ($this->fileWatchers as $fileWatcher) {
-            $master->addProcess(new Process(static function () use ($fileWatcher, $master): void {
-                $fileWatcher->run($master);
+            $master->addProcess(new Process(static function () use ($fileWatcher, $master, $masterPid): void {
+                $fileWatcher->run($master, (int) $masterPid);
             }, false, 0, true));
         }
     }

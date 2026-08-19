@@ -64,6 +64,17 @@ final class HttpAndTcpTest extends ServerTestCase
         self::assertSame('ECHO: hello', $reply);
     }
 
+    #[Test]
+    public function anAttachedTcpTransportDisablesRecyclingAutomatically(): void
+    {
+        $response = $this->rawRequest("GET /settings HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        $settings = json_decode($this->bodyOf($response), true);
+
+        self::assertIsArray($settings, 'the /settings route must expose the effective Swoole settings');
+        self::assertSame(0, $settings['max_request'] ?? null, 'raw-TCP clients stay connected — recycling must be off');
+        self::assertSame(30, $settings['max_wait_time'] ?? null, 'the drain window must rise to the 30s floor');
+    }
+
     /**
      * Send raw bytes to the TCP port and read until the reply's trailing newline.
      */

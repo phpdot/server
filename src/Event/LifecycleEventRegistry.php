@@ -52,7 +52,9 @@ final class LifecycleEventRegistry
 
     /**
      * Subscribe a lifecycle listener. Each On*Interface it implements is wired
-     * onto the matching event by register(). Listeners stack — never replace.
+     * onto the matching event by register(). Listeners stack — never replace —
+     * and an already-subscribed instance is ignored, so an accidental double
+     * subscribe() cannot make every hook fire twice.
      *
      * @param object $listener
      *
@@ -60,6 +62,10 @@ final class LifecycleEventRegistry
      */
     public function subscribe(object $listener): void
     {
+        if (in_array($listener, $this->listeners, true)) {
+            return;
+        }
+
         $this->listeners[] = $listener;
     }
 
@@ -84,11 +90,9 @@ final class LifecycleEventRegistry
                 $server->shutdown();
             });
 
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnStartInterface) {
-                    $listener->onStart($server);
-                }
-            }
+            self::fanOut($listeners, OnStartInterface::class, 'start', static function (OnStartInterface $listener) use ($server): void {
+                $listener->onStart($server);
+            });
         });
 
         $master->on('managerStart', static function () use ($server, $listeners, $isBase): void {
@@ -97,46 +101,36 @@ final class LifecycleEventRegistry
                     $server->shutdown();
                 }
                 : static function (): void {});
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnManagerStartInterface) {
-                    $listener->onManagerStart($server);
-                }
-            }
+            self::fanOut($listeners, OnManagerStartInterface::class, 'managerStart', static function (OnManagerStartInterface $listener) use ($server): void {
+                $listener->onManagerStart($server);
+            });
         });
 
         $master->on('managerStop', static function () use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnManagerStopInterface) {
-                    $listener->onManagerStop($server);
-                }
-            }
+            self::fanOut($listeners, OnManagerStopInterface::class, 'managerStop', static function (OnManagerStopInterface $listener) use ($server): void {
+                $listener->onManagerStop($server);
+            });
         });
 
         $master->on('workerStart', static function (SwooleServer $s, int $workerId) use ($server, $listeners, $isBase): void {
             if (!($isBase && $workerId === 0)) {
                 \Swoole\Process::signal(SIGINT, static function (): void {});
             }
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnWorkerStartInterface) {
-                    $listener->onWorkerStart($server, $workerId);
-                }
-            }
+            self::fanOut($listeners, OnWorkerStartInterface::class, 'workerStart', static function (OnWorkerStartInterface $listener) use ($server, $workerId): void {
+                $listener->onWorkerStart($server, $workerId);
+            });
         });
 
         $master->on('workerStop', static function (SwooleServer $s, int $workerId) use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnWorkerStopInterface) {
-                    $listener->onWorkerStop($server, $workerId);
-                }
-            }
+            self::fanOut($listeners, OnWorkerStopInterface::class, 'workerStop', static function (OnWorkerStopInterface $listener) use ($server, $workerId): void {
+                $listener->onWorkerStop($server, $workerId);
+            });
         });
 
         $master->on('workerExit', function (SwooleServer $s, int $workerId) use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnWorkerExitInterface) {
-                    $listener->onWorkerExit($server, $workerId);
-                }
-            }
+            self::fanOut($listeners, OnWorkerExitInterface::class, 'workerExit', static function (OnWorkerExitInterface $listener) use ($server, $workerId): void {
+                $listener->onWorkerExit($server, $workerId);
+            });
 
             /**
              * @var float $drainStartedAt
@@ -158,44 +152,70 @@ final class LifecycleEventRegistry
         });
 
         $master->on('workerError', static function (SwooleServer $s, int $workerId, int $workerPid, int $exitCode, int $signal) use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnWorkerErrorInterface) {
-                    $listener->onWorkerError($server, $workerId, $workerPid, $exitCode, $signal);
-                }
-            }
+            self::fanOut($listeners, OnWorkerErrorInterface::class, 'workerError', static function (OnWorkerErrorInterface $listener) use ($server, $workerId, $workerPid, $exitCode, $signal): void {
+                $listener->onWorkerError($server, $workerId, $workerPid, $exitCode, $signal);
+            });
         });
 
         $master->on('beforeShutdown', static function () use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnBeforeShutdownInterface) {
-                    $listener->onBeforeShutdown($server);
-                }
-            }
+            self::fanOut($listeners, OnBeforeShutdownInterface::class, 'beforeShutdown', static function (OnBeforeShutdownInterface $listener) use ($server): void {
+                $listener->onBeforeShutdown($server);
+            });
         });
 
         $master->on('shutdown', static function () use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnShutdownInterface) {
-                    $listener->onShutdown($server);
-                }
-            }
+            self::fanOut($listeners, OnShutdownInterface::class, 'shutdown', static function (OnShutdownInterface $listener) use ($server): void {
+                $listener->onShutdown($server);
+            });
         });
 
         $master->on('beforeReload', static function () use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnBeforeReloadInterface) {
-                    $listener->onBeforeReload($server);
-                }
-            }
+            self::fanOut($listeners, OnBeforeReloadInterface::class, 'beforeReload', static function (OnBeforeReloadInterface $listener) use ($server): void {
+                $listener->onBeforeReload($server);
+            });
         });
 
         $master->on('afterReload', static function () use ($server, $listeners): void {
-            foreach ($listeners as $listener) {
-                if ($listener instanceof OnAfterReloadInterface) {
-                    $listener->onAfterReload($server);
-                }
-            }
+            self::fanOut($listeners, OnAfterReloadInterface::class, 'afterReload', static function (OnAfterReloadInterface $listener) use ($server): void {
+                $listener->onAfterReload($server);
+            });
         });
+    }
+
+    /**
+     * Deliver one lifecycle moment to every listener implementing $interface,
+     * isolating throws: a failing listener is logged and skipped so it can
+     * never starve the listeners behind it — the same isolation contract as
+     * ListenerBridge. Uncaught, a throw would bubble out of the Swoole
+     * composite and skip every remaining subscriber for that event.
+     *
+     * @template T of object
+     *
+     * @param list<object> $listeners All subscribed listeners
+     * @param class-string<T> $interface The On*Interface to select
+     * @param string $event The Swoole event name, for the log line
+     * @param \Closure(T): void $call Invokes the hook on one listener
+     *
+     * @return void
+     */
+    private static function fanOut(array $listeners, string $interface, string $event, \Closure $call): void
+    {
+        foreach ($listeners as $listener) {
+            if (!$listener instanceof $interface) {
+                continue;
+            }
+
+            try {
+                $call($listener);
+            } catch (\Throwable $e) {
+                error_log(sprintf(
+                    '[server-lifecycle] %s failed on %s: %s',
+                    $listener::class,
+                    $event,
+                    $e->getMessage(),
+                ));
+            }
+        }
     }
 
     /**
