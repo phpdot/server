@@ -68,6 +68,19 @@ final class ControlSocket
                 $stats = $server->stats();
                 $stats['answering_worker_pid'] = getmypid();
                 $server->send($fd, json_encode($stats) . "\n");
+            } elseif (trim($data) === 'drain') {
+                /*
+                 * The EFFECTIVE drain window, floor raises included — the one
+                 * number server:stop needs and config alone cannot answer,
+                 * because the streaming floor depends on the handler the
+                 * running server was served with, not on anything the CLI can
+                 * recompute.
+                 */
+                $setting = $server->setting['max_wait_time'] ?? null;
+
+                $server->send($fd, json_encode([
+                    'max_wait_time' => is_int($setting) || is_string($setting) ? (int) $setting : null,
+                ]) . "\n");
             } else {
                 $server->send($fd, json_encode(['error' => 'unknown command']) . "\n");
             }

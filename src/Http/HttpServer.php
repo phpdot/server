@@ -33,6 +33,7 @@ use Psr\Http\Message\StreamFactoryInterface;
 use Psr\Http\Message\UploadedFileFactoryInterface;
 use Psr\Http\Message\UriFactoryInterface;
 use Psr\Http\Server\RequestHandlerInterface;
+use Swoole\Coroutine;
 use Swoole\Http\Request as SwooleRequest;
 use Swoole\Http\Response as SwooleResponse;
 use Swoole\Server as SwooleServer;
@@ -228,7 +229,7 @@ final class HttpServer implements Transport, OnWorkerExitInterface
                 $psr = $this->requestConverter->toServerRequest($req);
 
                 if ($isSse && str_contains($psr->getHeaderLine('accept'), 'text/event-stream')) {
-                    $sseCid = \Swoole\Coroutine::getCid();
+                    $sseCid = Coroutine::getCid();
                     $this->sseCoroutineIds[$sseCid] = true;
 
                     try {
@@ -246,7 +247,7 @@ final class HttpServer implements Transport, OnWorkerExitInterface
                                     $headersSet = true;
                                 }
 
-                                if (\Swoole\Coroutine::isCanceled()) {
+                                if (Coroutine::isCanceled()) {
                                     return false;
                                 }
 
@@ -320,14 +321,12 @@ final class HttpServer implements Transport, OnWorkerExitInterface
         if ($this->sseCoroutineIds !== []) {
             $cids = array_keys($this->sseCoroutineIds);
 
-            \Swoole\Coroutine::create(static function () use ($cids): void {
+            Coroutine::create(static function () use ($cids): void {
                 foreach ($cids as $cid) {
-                    \Swoole\Coroutine::cancel($cid);
+                    Coroutine::cancel($cid);
                 }
             });
         }
-
-        \Swoole\Timer::clearAll();
 
         if ($server->config()->mode !== SWOOLE_BASE) {
             return;
@@ -348,6 +347,22 @@ final class HttpServer implements Transport, OnWorkerExitInterface
 
             $master->close($fd);
             unset($this->openFds[$fd]);
+        }
+
+        /*
+         * Close the WebSocket channels NOW, in the drain, while the reactor
+         * still answers. Left to teardown, their close handlers fire after
+         * I/O is gone — and a handler that does socket or Redis work on
+         * unsubscribe parks its coroutine for good, holding the exit past
+         * every deadline. A channel has no in-flight request to wait out;
+         * its teardown IS the in-flight work the drain exists for.
+         */
+        if ($this->wsAcceptedFds !== [] && $master instanceof WebSocketServer) {
+            foreach (array_keys($this->wsAcceptedFds) as $fd) {
+                $master->disconnect($fd, 1001, 'server stopping');
+
+                unset($this->wsAcceptedFds[$fd], $this->openFds[$fd]);
+            }
         }
     }
 }

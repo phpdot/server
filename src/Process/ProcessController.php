@@ -154,7 +154,7 @@ final class ProcessController
 
         SwooleProcess::kill($pid, SIGTERM);
 
-        if ($this->waitForExit($pid, $this->config->stopTimeout)) {
+        if ($this->waitForExit($pid, $this->patience())) {
             $this->removeStalePid();
 
             return StopResult::Graceful;
@@ -165,6 +165,62 @@ final class ProcessController
         $this->removeStalePid();
 
         return StopResult::Forced;
+    }
+
+    /**
+     * How long to wait before escalating to SIGKILL.
+     *
+     * The configured stopTimeout is a floor, never a ceiling over the drain:
+     * the running server may have raised its drain window beyond what config
+     * states (the streaming floor), and killing the master mid-drain defeats
+     * the window the server just extended for itself. The control socket
+     * answers the EFFECTIVE window when it is reachable; when it is not
+     * (unreachable socket, older server) the configured value stands.
+     *
+     * @return int Seconds; 0 waits forever
+     */
+    private function patience(): int
+    {
+        $configured = $this->config->stopTimeout;
+
+        $window = $this->drainWindow();
+
+        return $window !== null && $configured !== 0 ? max($configured, $window) : $configured;
+    }
+
+    /**
+     * The running server's effective drain window, or null when it cannot be
+     * asked.
+     *
+     * @return int|null Seconds the server will let its workers drain
+     */
+    private function drainWindow(): int|null
+    {
+        $path = $this->config->controlSocket();
+
+        if (!is_file($path) || filesize($path) === 0) {
+            return null;
+        }
+
+        $socket = @stream_socket_client('unix://' . $path, $errno, $errstr, 1.0);
+
+        if ($socket === false) {
+            return null;
+        }
+
+        try {
+            fwrite($socket, "drain\n");
+
+            $answer = (string) fgets($socket);
+        } finally {
+            fclose($socket);
+        }
+
+        $decoded = json_decode($answer, true);
+
+        $window = is_array($decoded) ? ($decoded['max_wait_time'] ?? null) : null;
+
+        return is_int($window) && $window > 0 ? $window : null;
     }
 
     /**

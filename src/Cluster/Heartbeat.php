@@ -19,6 +19,7 @@ declare(strict_types=1);
 
 namespace PHPdot\Server\Cluster;
 
+use PHPdot\Container\Attribute\Singleton;
 use PHPdot\Server\Attribute\ServerListener;
 use PHPdot\Server\Config\HttpServerConfig;
 use PHPdot\Server\Config\ServerConfig;
@@ -27,6 +28,7 @@ use Psr\Container\ContainerInterface;
 use Throwable;
 
 #[ServerListener]
+#[Singleton]
 final class Heartbeat
 {
     public const string KEY_PREFIX = 'phpdot:cluster:nodes:';
@@ -34,6 +36,13 @@ final class Heartbeat
     private const int INTERVAL_MS = 5000;
 
     private const int TTL_SECONDS = 15;
+
+    /**
+     * Wall-clock bound on one beat: the watchdog cancels a beat still running
+     * after this, because a socket park under the coroutine hooks outlives
+     * every configured timeout.
+     */
+    private const int BEAT_LIMIT_MS = 5000;
 
     /**
      * True while a beat is in flight.
@@ -46,6 +55,20 @@ final class Heartbeat
      * true of a runtime without coroutines.
      */
     private bool $beating = false;
+
+    /**
+     * The in-flight beat's coroutine, so {@see halt()} can cancel it — the
+     * park that actually holds the drain.
+     */
+    private null|int $beatCid = null;
+
+    /**
+     * The tick's id, kept so {@see HeartbeatHalt} can cancel it on worker
+     * exit. A live timer holds the worker's event loop open, so without this
+     * the drain window is always spent in full — the master waits on a
+     * heartbeat nobody can stop.
+     */
+    private null|int $tickId = null;
 
     /**
      * Create the heartbeat over the container and server identity.
@@ -89,7 +112,31 @@ final class Heartbeat
             return;
         }
 
-        $redis = new \PHPdot\Redis\RedisConnection($config);
+        /*
+         * A BOUNDED copy: the host's read timeout is its business, but this
+         * connection belongs to a timer, and a beat parked on a dead socket
+         * must return on its own — the tick's cancellation cannot recall a
+         * beat already in flight, so an unbounded read here is an unbounded
+         * worker drain no matter who cancels what.
+         */
+        $bounded = new \PHPdot\Redis\Config\RedisConfig(
+            host: $config->host,
+            port: $config->port,
+            path: $config->path,
+            password: $config->password,
+            username: $config->username,
+            database: $config->database,
+            timeout: $config->timeout === 0.0 ? 2.0 : $config->timeout,
+            retryInterval: $config->retryInterval,
+            readTimeout: $config->readTimeout === 0.0 ? 2.0 : $config->readTimeout,
+            tls: $config->tls,
+            ssl: $config->ssl,
+            maxRetries: $config->maxRetries,
+            persistent: $config->persistent,
+            context: $config->context,
+        );
+
+        $redis = new \PHPdot\Redis\RedisConnection($bounded);
 
         $nodeId = self::identity($this->master, $this->http);
         $masterPid = $this->masterPid($event);
@@ -101,6 +148,7 @@ final class Heartbeat
             }
 
             $this->beating = true;
+            $this->beatCid = \Swoole\Coroutine::getCid();
 
             try {
                 $stats = $event->server->getMaster()->stats();
@@ -125,11 +173,69 @@ final class Heartbeat
             } catch (Throwable) {
             } finally {
                 $this->beating = false;
+                $this->beatCid = null;
             }
         };
 
+        /*
+         * Each beat in its OWN coroutine, so a beat parked on an unanswering
+         * socket can be CANCELLED. Socket timeouts do not bind under the
+         * coroutine hooks — a connect or setex parked on a dead peer parks for
+         * the process's life — and the drain waits on it. The watchdog bounds
+         * every beat; halt() bounds the last one.
+         */
+        $arm = static function () use ($beat): void {
+            $cid = \Swoole\Coroutine::create($beat);
+
+            if ($cid === false) {
+                return;
+            }
+
+            \Swoole\Timer::after(self::BEAT_LIMIT_MS, static function () use ($cid): void {
+                if (\Swoole\Coroutine::exists($cid)) {
+                    \Swoole\Coroutine::cancel($cid);
+                }
+            });
+        };
+
+        /*
+         * The first beat runs inline as well as armed: the registry entry must
+         * exist before the first tick, so cluster:status sees a node the
+         * moment the server answers.
+         */
         $beat();
-        \Swoole\Timer::tick(self::INTERVAL_MS, $beat);
+        $arm();
+
+        $tickId = \Swoole\Timer::tick(self::INTERVAL_MS, $arm);
+
+        /*
+         * A false id means the timer never armed (the loop is gone) — nothing
+         * to cancel, nothing to keep.
+         */
+        $this->tickId = $tickId === false ? null : $tickId;
+    }
+
+    /**
+     * Cancel the tick AND the in-flight beat — the worker-exit call.
+     *
+     * Idempotent and safe in every worker: only worker 0 ever holds a tick.
+     * The cancel matters as much as the clear: a beat parked on an
+     * unanswering socket is what actually holds the drain open, and no timer
+     * cancellation recalls it.
+     *
+     * @return void
+     */
+    public function halt(): void
+    {
+        if ($this->tickId !== null) {
+            \Swoole\Timer::clear($this->tickId);
+
+            $this->tickId = null;
+        }
+
+        if ($this->beatCid !== null && \Swoole\Coroutine::exists($this->beatCid)) {
+            \Swoole\Coroutine::cancel($this->beatCid);
+        }
     }
 
     /**

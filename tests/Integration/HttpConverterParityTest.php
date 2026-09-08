@@ -100,8 +100,9 @@ final class HttpConverterParityTest extends ServerTestCase
     public function serverErrorPassesTheMessageThroughByDesign(): void
     {
         // The last-resort 500 leaks the raw exception message ON PURPOSE — the app's
-        // phpdot/error-handler middleware sanitizes exceptions upstream. Locked so a
-        // future change can't silently break that contract.
+        // phpdot/error-handler middleware sanitizes exceptions upstream (and owns the
+        // development debug page). Locked so a future change can't silently break that
+        // division of responsibility.
         $response = $this->rawRequest("GET /boom HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
 
         self::assertStringContainsString('500', $this->statusLine($response));
