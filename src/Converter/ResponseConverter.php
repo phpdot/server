@@ -41,7 +41,8 @@ final class ResponseConverter
     ) {}
 
     /**
-     * Write a PSR-7 response to a Swoole response.
+     * Write a PSR-7 response to a Swoole response; one the client already abandoned is left untouched, since Swoole's
+     * cookie writer dereferences the vanished context of a reset HTTP/2 stream.
      *
      * @param bool $omitBody Emit status + headers only (HEAD requests).
      * @param bool $started Set true once the body begins streaming; lets the caller
@@ -57,6 +58,10 @@ final class ResponseConverter
         bool $omitBody = false,
         bool &$started = false,
     ): void {
+        if (!$swooleResponse->isWritable()) {
+            return;
+        }
+
         $swooleResponse->status($psrResponse->getStatusCode(), $psrResponse->getReasonPhrase());
 
         $trailerNames = [];
