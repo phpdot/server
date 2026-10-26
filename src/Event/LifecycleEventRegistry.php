@@ -205,16 +205,33 @@ final class LifecycleEventRegistry
                 continue;
             }
 
-            try {
-                $call($listener);
-            } catch (\Throwable $e) {
-                error_log(sprintf(
-                    '[server-lifecycle] %s failed on %s: %s',
-                    $listener::class,
-                    $event,
-                    $e->getMessage(),
-                ));
-            }
+            self::invoke($call, $listener, $event);
+        }
+    }
+
+    /**
+     * Invoke one hook, isolating its throw. The parameter types carry the
+     * generic, so no instanceof narrowing has to survive into the try block.
+     *
+     * @template T of object
+     *
+     * @param \Closure(T): void $call
+     * @param T $listener
+     * @param string $event The Swoole event name, for the log line
+     *
+     * @return void
+     */
+    private static function invoke(\Closure $call, object $listener, string $event): void
+    {
+        try {
+            $call($listener);
+        } catch (\Throwable $e) {
+            error_log(sprintf(
+                '[server-lifecycle] %s failed on %s: %s',
+                $listener::class,
+                $event,
+                $e->getMessage(),
+            ));
         }
     }
 
