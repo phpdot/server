@@ -45,10 +45,10 @@ with a unix control socket for CLI introspection — operational endpoints are t
 | PHP | `>= 8.5` |
 | ext-swoole | `>= 6.2` |
 | `composer-runtime-api` | `^2.2` |
-| `phpdot/attribute` | `^0.5` |
-| `phpdot/console` | `^0.5` |
-| `phpdot/contracts` | `^0.5` |
-| `phpdot/http` | `^0.5` |
+| `phpdot/attribute` | `^0.6` |
+| `phpdot/console` | `^0.6` |
+| `phpdot/contracts` | `^0.6` |
+| `phpdot/http` | `^0.6` |
 | `psr/container` | `^2.0` |
 | `psr/http-factory` | `^1.0` |
 | `psr/http-message` | `^2.0` |
