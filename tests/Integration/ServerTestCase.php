@@ -57,6 +57,14 @@ abstract class ServerTestCase extends TestCase
     protected function tearDown(): void
     {
         if (is_resource($this->process)) {
+            // The pid is trustworthy only on the FIRST proc_get_status call —
+            // later calls against an exited process may report -1.
+            $masterPid = (int) proc_get_status($this->process)['pid'];
+
+            // Snapshot the tree while the master still owns it: once it exits,
+            // the children reparent and a pid scan can no longer find them.
+            $tree = $this->processTree($masterPid);
+
             proc_terminate($this->process, SIGTERM);
 
             $deadline = microtime(true) + 3.0;
@@ -71,7 +79,24 @@ abstract class ServerTestCase extends TestCase
             // SIGKILL the WHOLE process tree. macOS has no PR_SET_PDEATHSIG, so killing only
             // the master would orphan the manager/worker; snapshot + kill the tree instead.
             if (proc_get_status($this->process)['running'] === true) {
-                $this->killProcessTree(proc_get_status($this->process)['pid']);
+                $this->killProcessTree($masterPid);
+            }
+
+            // The tree must be fully gone before the next test boots its own
+            // server: a user process (the orphan watchdog sweeps for seconds
+            // after a graceful stop) can catch a pid the runner recycled onto
+            // that fresh server and reap it — the mid-window death the
+            // watchdog-survival test exists to catch.
+            $sweepDeadline = microtime(true) + 6.0;
+
+            foreach (array_slice($tree, 1) as $treePid) {
+                while (microtime(true) < $sweepDeadline && posix_kill($treePid, 0)) {
+                    usleep(100_000);
+                }
+
+                if (posix_kill($treePid, 0)) {
+                    @posix_kill($treePid, SIGKILL);
+                }
             }
 
             proc_close($this->process);
