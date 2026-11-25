@@ -113,7 +113,10 @@ final class ProcessControllerTest extends TestCase
     #[Test]
     public function stopEscalatesToKillWhenTermIsIgnored(): void
     {
-        $this->spawn('pcntl_async_signals(true); pcntl_signal(SIGTERM, function (): void {}); while (true) { usleep(50000); }');
+        $this->spawn(
+            'pcntl_async_signals(true); pcntl_signal(SIGTERM, function (): void {}); touch(getenv("PHPDOT_SPAWN_READY")); while (true) { usleep(50000); }',
+            reportsWhenReady: true,
+        );
         file_put_contents($this->pidFile, (string) $this->childPid);
 
         self::assertSame(StopResult::Forced, $this->controller(stopTimeout: 1)->stop());
@@ -148,23 +151,42 @@ final class ProcessControllerTest extends TestCase
      * linger as an unreaped zombie that still answers kill(pid, 0) and
      * blinds every liveness probe under test.
      *
+     * The child reports readiness by creating PHPDOT_SPAWN_READY: how long a
+     * PHP process takes to start is the machine's business, and a fixed
+     * sleep shorter than that startup hands every signal to a child that has
+     * not armed its handlers yet.
+     *
      * @param string $code The php statements to run
+     * @param bool $reportsWhenReady The code creates the readiness file itself, at the point it is ready; otherwise it is created first
      *
      * @return void
      */
-    private function spawn(string $code): void
+    private function spawn(string $code, bool $reportsWhenReady = false): void
     {
+        $ready = (string) tempnam(sys_get_temp_dir(), 'phpdot-spawn-');
+        self::assertNotSame('', $ready, 'failed to allocate a readiness file');
+        self::assertTrue(unlink($ready), 'failed to clear the readiness file');
+
         $raw = shell_exec(sprintf(
-            '%s -r %s > /dev/null 2>&1 & echo $!',
+            'PHPDOT_SPAWN_READY=%s %s -r %s > /dev/null 2>&1 & echo $!',
+            escapeshellarg($ready),
             escapeshellarg(PHP_BINARY),
-            escapeshellarg($code),
+            escapeshellarg($reportsWhenReady ? $code : 'touch(getenv("PHPDOT_SPAWN_READY")); ' . $code),
         ));
 
         $pid = is_string($raw) ? (int) trim($raw) : 0;
         self::assertGreaterThan(0, $pid, 'failed to spawn the detached child process');
 
         $this->childPid = $pid;
-        usleep(150_000);
+
+        $deadline = microtime(true) + 10.0;
+
+        while (!is_file($ready) && microtime(true) < $deadline) {
+            usleep(5000);
+        }
+
+        self::assertFileExists($ready, 'the detached child never reported readiness');
+        @unlink($ready);
         self::assertTrue(posix_kill($pid, 0), 'the child must be alive after spawn');
     }
 

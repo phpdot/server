@@ -96,6 +96,7 @@ final class WorkerRecycleTest extends ServerTestCase
     {
         self::assertIsResource($this->process);
 
+        $this->waitUntilSignallable();
         $master = proc_get_status($this->process)['pid'];
         $before = $this->childPids($master);
         self::assertGreaterThanOrEqual(2, count($before), 'fixture should run at least two workers');
@@ -131,6 +132,7 @@ final class WorkerRecycleTest extends ServerTestCase
     {
         self::assertIsResource($this->process);
 
+        $this->waitUntilSignallable();
         posix_kill(proc_get_status($this->process)['pid'], SIGUSR1);
 
         $deadline = microtime(true) + 7.0;
@@ -151,7 +153,7 @@ final class WorkerRecycleTest extends ServerTestCase
 
         self::assertTrue(
             proc_get_status($this->process)['running'],
-            'the orphan watchdog reaped a healthy tree after a reload (BASE master_pid holds a worker pid)',
+            'the master died within the watchdog window after a reload',
         );
 
         $response = $this->rawRequest("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");

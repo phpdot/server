@@ -15,6 +15,8 @@ use PHPUnit\Framework\TestCase;
  */
 abstract class ServerTestCase extends TestCase
 {
+    private const string PROBE = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+
     /** @var resource|null */
     protected $process = null;
 
@@ -171,6 +173,64 @@ abstract class ServerTestCase extends TestCase
         }
 
         self::fail("server did not become ready in time:\n" . (string) @file_get_contents($this->logFile));
+    }
+
+    /**
+     * Wait until the server may be signalled. Swoole binds its ports and
+     * forks its workers and user processes before the master arms its signal
+     * handlers, so a signal sent on the first accepted connection takes its
+     * default action: a reload then kills the master and orphans its
+     * children. A served request proves the workers run, and once the set of
+     * children has held still the master has had nothing left to do but arm.
+     *
+     * @return void
+     */
+    protected function waitUntilSignallable(): void
+    {
+        if (!is_resource($this->process)) {
+            self::fail('no server process to wait for');
+        }
+
+        $master = proc_get_status($this->process)['pid'];
+        $deadline = microtime(true) + 5.0;
+        $held = [];
+        $heldSince = 0.0;
+
+        while (microtime(true) < $deadline) {
+            $children = array_slice($this->processTree($master), 1);
+            $served = $children !== [] && str_starts_with($this->probeStatusLine(), 'HTTP/');
+            $now = microtime(true);
+
+            if (!$served || $children !== $held) {
+                $held = $served ? $children : [];
+                $heldSince = $now;
+            } elseif ($now - $heldSince >= 0.15) {
+                return;
+            }
+
+            usleep(25000);
+        }
+
+        self::fail("server never became signallable:\n" . (string) @file_get_contents($this->logFile));
+    }
+
+    /**
+     * @return string The status line of one probe request, empty when none was served.
+     */
+    private function probeStatusLine(): string
+    {
+        $fp = @fsockopen('127.0.0.1', $this->port, $errno, $errstr, 0.5);
+
+        if ($fp === false) {
+            return '';
+        }
+
+        stream_set_timeout($fp, 1);
+        fwrite($fp, self::PROBE);
+        $line = (string) fgets($fp);
+        fclose($fp);
+
+        return trim($line);
     }
 
     protected function rawRequest(string $raw): string
